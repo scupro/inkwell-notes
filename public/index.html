@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#ffffff">
+  <title>Inkwell</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖋️</text></svg>">
+  <link rel="stylesheet" id="hl-light" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.10.0/styles/github.min.css">
+  <link rel="stylesheet" id="hl-dark" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.10.0/styles/github-dark.min.css">
+  <link rel="stylesheet" href="/style.css">
+  <script>
+    (function () {
+      var t = localStorage.getItem('theme') ||
+        (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      document.documentElement.dataset.theme = t;
+    })();
+  </script>
+</head>
+<body>
+
+  <!-- 登入 -->
+  <div id="login" class="login hidden">
+    <form id="loginForm" class="login-card">
+      <div class="login-logo">🖋️</div>
+      <h1>Inkwell</h1>
+      <p class="muted">輸入訪問密碼以繼續</p>
+      <input id="pw" type="password" placeholder="密碼" autocomplete="current-password" required>
+      <button type="submit" class="btn primary" id="loginBtn">登入</button>
+      <div id="loginErr" class="err"></div>
+    </form>
+  </div>
+
+  <div id="app" class="app hidden">
+    <!-- 第一列：分類與標籤 -->
+    <aside id="sidebar" class="sidebar">
+      <div class="side-top">
+        <div class="brand"><span>🖋️</span><span>Inkwell</span></div>
+        <button class="icon-btn" id="collapseSide" title="收起側欄"><i data-i="panel"></i></button>
+      </div>
+      <nav id="nav" class="nav"></nav>
+      <div class="side-bottom">
+        <button class="nav-item" id="themeBtn"></button>
+        <button class="nav-item" id="logoutBtn"><i data-i="logout"></i><span class="label">登出</span></button>
+      </div>
+    </aside>
+    <div id="scrim" class="scrim"></div>
+
+    <!-- 第二列：筆記列表 -->
+    <section class="list-pane">
+      <header class="list-head">
+        <button class="icon-btn" id="toggleSide" title="分類與標籤"><i data-i="panel"></i></button>
+        <h2 id="listTitle">全部筆記</h2>
+        <button class="icon-btn" id="newNote" title="新建筆記 (Alt+N)"><i data-i="plus"></i></button>
+      </header>
+      <label class="search"><i data-i="search"></i><input id="search" type="search" placeholder="搜索筆記" autocomplete="off"></label>
+      <div id="list" class="list"></div>
+    </section>
+
+    <!-- 第三列：編輯 / 閱讀 -->
+    <main class="editor-pane">
+      <header class="ed-head">
+        <button class="icon-btn mobile-only" id="backBtn" title="返回"><i data-i="back"></i></button>
+        <div class="crumbs" id="crumbs"></div>
+        <span class="status" id="status"></span>
+        <div class="seg" id="modeSeg">
+          <button data-mode="read" title="閱讀 (Ctrl+E)"><i data-i="eye"></i></button>
+          <button data-mode="edit" title="編輯 (Ctrl+E)"><i data-i="pencil"></i></button>
+          <button data-mode="split" class="desktop-only" title="分欄預覽"><i data-i="columns"></i></button>
+        </div>
+        <button class="icon-btn" id="pinBtn" title="置頂"><i data-i="pin"></i></button>
+        <button class="icon-btn" id="delBtn" title="刪除"><i data-i="trash"></i></button>
+      </header>
+
+      <div id="empty" class="empty">
+        <div>
+          <div class="empty-icon">📄</div>
+          <p>選擇一篇筆記，或新建一篇</p>
+          <button class="btn primary" id="emptyNew">新建筆記</button>
+        </div>
+      </div>
+
+      <div id="doc" class="doc hidden">
+        <div class="doc-scroll" id="docScroll">
+          <div class="doc-inner">
+            <textarea id="title" class="title" rows="1" placeholder="無標題"></textarea>
+            <div class="props">
+              <div class="prop">
+                <span class="prop-k"><i data-i="folder"></i>分類</span>
+                <select id="catSel"></select>
+              </div>
+              <div class="prop">
+                <span class="prop-k"><i data-i="hash"></i>標籤</span>
+                <div class="tags-input" id="tagsBox">
+                  <input id="tagInput" placeholder="添加標籤…" list="tagList" autocomplete="off">
+                </div>
+                <datalist id="tagList"></datalist>
+              </div>
+              <div class="prop">
+                <span class="prop-k"><i data-i="clock"></i>更新</span>
+                <span id="updated" class="muted"></span>
+              </div>
+            </div>
+            <div class="toolbar" id="toolbar">
+              <button data-cmd="heading" title="標題"><i data-i="heading"></i></button>
+              <button data-cmd="bold" title="粗體 (Ctrl+B)"><i data-i="bold"></i></button>
+              <button data-cmd="italic" title="斜體 (Ctrl+I)"><i data-i="italic"></i></button>
+              <span class="sep"></span>
+              <button data-cmd="list" title="列表"><i data-i="list"></i></button>
+              <button data-cmd="check" title="待辦"><i data-i="check"></i></button>
+              <button data-cmd="quote" title="引用"><i data-i="quote"></i></button>
+              <button data-cmd="code" title="代碼塊"><i data-i="code"></i></button>
+              <button data-cmd="table" title="表格"><i data-i="table"></i></button>
+              <span class="sep"></span>
+              <button data-cmd="link" title="鏈接"><i data-i="link"></i></button>
+              <button data-cmd="image" title="插入圖片"><i data-i="image"></i></button>
+              <button data-cmd="audio" title="插入音頻"><i data-i="music"></i></button>
+              <button data-cmd="video" title="插入視頻"><i data-i="video"></i></button>
+            </div>
+            <div class="panes">
+              <textarea id="body" class="body-input" placeholder="開始用 Markdown 書寫…&#10;&#10;圖片：![](https://…/a.jpg)&#10;音頻：![audio](https://…/a.mp3)&#10;視頻：![video](https://…/a.mp4) 或直接貼 YouTube / Bilibili 鏈接" spellcheck="false"></textarea>
+              <article id="preview" class="md"></article>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <div id="lightbox" class="lightbox hidden"><img alt=""></div>
+  <div id="toast" class="toast"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.10.0/highlight.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
