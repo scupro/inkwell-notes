@@ -9,13 +9,28 @@ const SECRET = (process.env.AUTH_SECRET || '') + '|' + PASSWORD;
 const SESSION_DAYS = Number(process.env.SESSION_DAYS) || 30;
 const sql = DB_URL ? neon(DB_URL) : null;
 
+/* ---------- Neon Object Storage（可選） ----------
+   Netlify 保留 AWS_* 變量名，所以用 NEON_S3_* */
+const S3 = {
+  endpoint: process.env.NEON_S3_ENDPOINT || process.env.AWS_ENDPOINT_URL_S3 || '',
+  region: process.env.NEON_S3_REGION || 'us-east-2',
+  accessKeyId: process.env.NEON_S3_ACCESS_KEY_ID || '',
+  secretAccessKey: process.env.NEON_S3_SECRET_ACCESS_KEY || '',
+  bucket: process.env.NEON_S3_BUCKET || 'inkwell',
+};
+const STORAGE_ON = !!(S3.endpoint && S3.accessKeyId && S3.secretAccessKey);
+const MAX_MB = Number(process.env.UPLOAD_MAX_MB) || 200;
+const PROXY_MAX = 4 * 1024 * 1024; // 直傳失敗時經函數中轉的上限（Netlify 請求體上限約 6MB）
+const FILE_KEY_RE = /^u\/\d{4}\/\d{2}\/[0-9a-f-]{36}(\.[a-z0-9]{1,8})?$/;
+const COOKIE = 'ink_files';
+
 export const config = { path: '/api/*' };
 
 /* ---------- helpers ---------- */
-const json = (data, status = 200) =>
+const json = (data, status = 200, extra = {}) =>
   new Response(JSON.stringify(data), {
     status,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...extra },
   });
 const readBody = async (req) => { try { return await req.json(); } catch { return {}; } };
 const hmac = (v) => crypto.createHmac('sha256', SECRET).update(v).digest('base64url');
@@ -27,13 +42,90 @@ function makeToken() {
   return `${exp}.${hmac(exp)}`;
 }
 function verify(header) {
-  const token = (header || '').replace(/^Bearer\s+/i, '');
+  return verifyToken((header || '').replace(/^Bearer\s+/i, ''));
+}
+function verifyToken(token) {
   const [exp, sig] = token.split('.');
   if (!exp || !sig) return false;
   const a = Buffer.from(hmac(exp));
   const b = Buffer.from(sig);
   return a.length === b.length && crypto.timingSafeEqual(a, b) && Number(exp) > Date.now();
 }
+const readCookie = (req, name) => {
+  const m = (req.headers.get('cookie') || '').match(new RegExp('(?:^|;\\s*)' + name + '=([^;]+)'));
+  return m ? decodeURIComponent(m[1]) : '';
+};
+// 媒體文件用 cookie 鑒權（<img>/<video> 無法帶 Authorization 頭）
+const fileCookie = (token) =>
+  `${COOKIE}=${token}; Path=/api/files; Max-Age=${token ? SESSION_DAYS * 86400 : 0}; HttpOnly; Secure; SameSite=Lax`;
+
+/* ---------- S3 client（按需載入） ---------- */
+let s3p;
+function s3() {
+  if (!s3p) {
+    s3p = (async () => {
+      const m = await import('@aws-sdk/client-s3');
+      const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
+      const client = new m.S3Client({
+        region: S3.region,
+        endpoint: S3.endpoint,
+        credentials: { accessKeyId: S3.accessKeyId, secretAccessKey: S3.secretAccessKey },
+        forcePathStyle: true,
+        requestChecksumCalculation: 'WHEN_REQUIRED',
+        responseChecksumValidation: 'WHEN_REQUIRED',
+      });
+      return { m, client, sign: getSignedUrl };
+    })().catch((e) => { s3p = null; throw e; });
+  }
+  return s3p;
+}
+
+// 確保 bucket 存在，並允許當前網站來源直接 PUT 上傳（CORS）
+const corsOk = new Set();
+async function ensureBucket(origin) {
+  if (corsOk.has(origin)) return true;
+  const { m, client } = await s3();
+  const Bucket = S3.bucket;
+  try {
+    await client.send(new m.HeadBucketCommand({ Bucket }));
+  } catch (e) {
+    const code = e?.$metadata?.httpStatusCode;
+    if (code !== 404 && e?.name !== 'NotFound' && e?.name !== 'NoSuchBucket') throw e;
+    try {
+      await client.send(new m.CreateBucketCommand({ Bucket }));
+    } catch (e2) {
+      throw new Error(`找不到 bucket「${Bucket}」，自動建立也失敗了，請在 Neon Console 的 Object storage 手動建立（${e2.name || e2.message}）`);
+    }
+  }
+  try {
+    let origins = [];
+    try {
+      const r = await client.send(new m.GetBucketCorsCommand({ Bucket }));
+      origins = (r.CORSRules || []).flatMap((x) => x.AllowedOrigins || []);
+    } catch { /* 尚未設定 CORS */ }
+    if (!origins.includes(origin) && !origins.includes('*')) {
+      const all = [...new Set([...origins, origin])].slice(-20);
+      await client.send(new m.PutBucketCorsCommand({
+        Bucket,
+        CORSConfiguration: { CORSRules: [{
+          AllowedOrigins: all, AllowedMethods: ['PUT', 'GET', 'HEAD'],
+          AllowedHeaders: ['*'], ExposeHeaders: ['ETag'], MaxAgeSeconds: 3600,
+        }] },
+      }));
+    }
+    corsOk.add(origin);
+    return true;
+  } catch (e) {
+    console.warn('PutBucketCors failed, client will fall back to proxy upload:', e?.name || e);
+    return false;
+  }
+}
+function newKey(name) {
+  const d = new Date();
+  const ext = (String(name).match(/\.([A-Za-z0-9]{1,8})$/) || [])[1];
+  return `u/${d.getUTCFullYear()}/${String(d.getUTCMonth() + 1).padStart(2, '0')}/${crypto.randomUUID()}${ext ? '.' + ext.toLowerCase() : ''}`;
+}
+
 const cleanTags = (t) =>
   [...new Set((Array.isArray(t) ? t : [])
     .map((x) => String(x).trim().replace(/^#/, '').slice(0, 50))
@@ -66,6 +158,12 @@ function init() {
       await sql`CREATE INDEX IF NOT EXISTS notes_updated_idx ON notes (pinned DESC, updated_at DESC)`;
       await sql`CREATE INDEX IF NOT EXISTS notes_tags_idx ON notes USING GIN (tags)`;
       await sql`CREATE INDEX IF NOT EXISTS notes_category_idx ON notes (category_id)`;
+      await sql`CREATE TABLE IF NOT EXISTS uploads (
+        key TEXT PRIMARY KEY,
+        name TEXT NOT NULL DEFAULT '',
+        type TEXT NOT NULL DEFAULT '',
+        size BIGINT NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now())`;
     })().catch((e) => { ready = null; throw e; });
   }
   return ready;
@@ -78,14 +176,32 @@ export default async (req) => {
   const method = req.method;
 
   try {
-    if (!sql) return json({ error: '伺服器未設定 DATABASE_URL' }, 500);
     if (!PASSWORD) return json({ error: '伺服器未設定 APP_PASSWORD' }, 500);
+
+    // 讀取已上傳的媒體：鑒權後 302 到短期簽名地址（bucket 保持私有）
+    const fm = path.match(/^\/files\/(.+)$/);
+    if (fm && (method === 'GET' || method === 'HEAD')) {
+      const key = decodeURIComponent(fm[1]);
+      if (!FILE_KEY_RE.test(key)) return new Response('not found', { status: 404 });
+      if (!verifyToken(readCookie(req, COOKIE)) && !verify(req.headers.get('authorization'))) {
+        return new Response('unauthorized', { status: 401, headers: { 'cache-control': 'no-store' } });
+      }
+      if (!STORAGE_ON) return new Response('storage not configured', { status: 503 });
+      const { m, client, sign } = await s3();
+      const target = await sign(client, new m.GetObjectCommand({ Bucket: S3.bucket, Key: key }), { expiresIn: 6 * 3600 });
+      return new Response(null, { status: 302, headers: { location: target, 'cache-control': 'private, max-age=10800' } });
+    }
+
+    if (path === '/logout' && method === 'POST') return json({ ok: true }, 200, { 'set-cookie': fileCookie('') });
+
+    if (!sql) return json({ error: '伺服器未設定 DATABASE_URL' }, 500);
 
     // 登入
     if (path === '/login' && method === 'POST') {
       const { password } = await readBody(req);
       if (typeof password === 'string' && crypto.timingSafeEqual(sha(password), sha(PASSWORD))) {
-        return json({ token: makeToken() });
+        const token = makeToken();
+        return json({ token }, 200, { 'set-cookie': fileCookie(token) });
       }
       await sleep(600);
       return json({ error: '密碼錯誤' }, 401);
@@ -106,7 +222,46 @@ export default async (req) => {
                    COUNT(*) FILTER (WHERE category_id IS NULL)::int AS uncategorized
             FROM notes`,
       ]);
-      return json({ categories, tags, ...counts[0] });
+      // 順便刷新媒體 cookie（舊會話登入時還沒有這個 cookie）
+      const token = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
+      return json(
+        { categories, tags, ...counts[0], storage: { enabled: STORAGE_ON, maxMb: MAX_MB } },
+        200, { 'set-cookie': fileCookie(token) });
+    }
+
+    // 申請上傳：返回預簽名 PUT 地址，瀏覽器直接上傳到 Neon Object Storage
+    if (path === '/uploads' && method === 'POST') {
+      if (!STORAGE_ON) return json({ error: '尚未設定 Neon Object Storage（NEON_S3_* 環境變量）' }, 503);
+      const b = await readBody(req);
+      const name = String(b.name || 'file').slice(0, 200);
+      const type = String(b.type || '').slice(0, 100) || 'application/octet-stream';
+      const size = Number(b.size) || 0;
+      if (size > MAX_MB * 1024 * 1024) return json({ error: `文件超過 ${MAX_MB} MB 上限` }, 413);
+      const origin = req.headers.get('origin') || url.origin;
+      const direct = await ensureBucket(origin);
+      const key = newKey(name);
+      const { m, client, sign } = await s3();
+      const uploadUrl = direct
+        ? await sign(client, new m.PutObjectCommand({ Bucket: S3.bucket, Key: key, ContentType: type }), { expiresIn: 900 })
+        : null;
+      await sql`INSERT INTO uploads (key, name, type, size) VALUES (${key}, ${name}, ${type}, ${size})`;
+      return json({ key, url: `/api/files/${key}`, uploadUrl, headers: { 'Content-Type': type }, proxyMax: PROXY_MAX }, 201);
+    }
+
+    // 後備：經函數中轉上傳（小文件，直傳被 CORS 擋住時用）
+    const um = path.match(/^\/uploads\/(.+)$/);
+    if (um && method === 'PUT') {
+      if (!STORAGE_ON) return json({ error: '尚未設定 Neon Object Storage' }, 503);
+      const key = decodeURIComponent(um[1]);
+      if (!FILE_KEY_RE.test(key)) return json({ error: 'bad key' }, 400);
+      const [row] = await sql`SELECT type FROM uploads WHERE key = ${key}`;
+      if (!row) return json({ error: '未知的上傳' }, 404);
+      const body = Buffer.from(await req.arrayBuffer());
+      if (body.length > PROXY_MAX) return json({ error: '文件太大，無法中轉上傳' }, 413);
+      const { m, client } = await s3();
+      await client.send(new m.PutObjectCommand({ Bucket: S3.bucket, Key: key, Body: body, ContentType: row.type }));
+      await sql`UPDATE uploads SET size = ${body.length} WHERE key = ${key}`;
+      return json({ ok: true });
     }
 
     // 筆記列表

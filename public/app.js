@@ -40,6 +40,7 @@ const ICONS = {
   table: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/>',
   x: '<path d="M18 6 6 18M6 6l12 12"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>',
 };
 const svg = (n) => `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[n] || ''}</svg>`;
 const hydrateIcons = (root = document) => $$('i[data-i]', root).forEach((i) => { i.outerHTML = svg(i.dataset.i); });
@@ -113,6 +114,7 @@ function showLogin() {
   setTimeout(() => $('#pw').focus(), 50);
 }
 function logout() {
+  fetch('/api/logout', { method: 'POST' }).catch(() => {});
   S.token = null;
   S.current = null;
   localStorage.removeItem('token');
@@ -492,6 +494,7 @@ const AUDIO_RE = /\.(mp3|wav|ogg|oga|m4a|aac|flac|opus|weba)(\?.*)?(#.*)?$/i;
 const IMAGE_RE = /\.(png|jpe?g|gif|webp|avif|svg|bmp)(\?.*)?(#.*)?$/i;
 const IFRAME_OK = /^https:\/\/(www\.youtube(-nocookie)?\.com\/embed\/|player\.vimeo\.com\/video\/|player\.bilibili\.com\/player\.html|open\.spotify\.com\/embed\/|w\.soundcloud\.com\/player\/)/i;
 const isHttp = (u) => /^https?:\/\//i.test(u);
+const isOwnFile = (u) => /^\/api\/files\//.test(u);
 
 function embedUrl(u) {
   let m;
@@ -509,7 +512,7 @@ function mediaKind(u) {
   return 'link';
 }
 function makeMedia(kind, src) {
-  if (!isHttp(src)) return null;
+  if (!isHttp(src) && !isOwnFile(src)) return null;
   if (kind === 'embed') {
     const w = document.createElement('div');
     w.className = 'embed';
@@ -541,7 +544,7 @@ function makeMedia(kind, src) {
 
 marked.setOptions({ gfm: true, breaks: true });
 DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-  if (node.tagName === 'A' && isHttp(node.getAttribute('href') || '')) {
+  if (node.tagName === 'A' && (isHttp(node.getAttribute('href') || '') || isOwnFile(node.getAttribute('href') || ''))) {
     node.setAttribute('target', '_blank');
     node.setAttribute('rel', 'noopener noreferrer');
   }
@@ -651,6 +654,87 @@ function insertMedia(kind) {
   if (!u || !u.trim()) return;
   insertText(kind === 'image' ? `![](${u.trim()})` : `\n![${kind}](${u.trim()})\n`);
 }
+/* ---- 上傳到 Neon Object Storage ---- */
+let upSeq = 0;
+function pickFiles() {
+  if (S.meta.storage && !S.meta.storage.enabled) { toast('尚未設定 Neon Object Storage，請在 Netlify 加上 NEON_S3_* 變量'); return; }
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.multiple = true;
+  inp.accept = 'image/*,video/*,audio/*,*/*';
+  inp.onchange = () => uploadFiles([...inp.files]);
+  inp.click();
+}
+function mdFor(file, url) {
+  const name = (file.name || 'file').replace(/[\[\]()\n]/g, ' ').trim();
+  const t = file.type || '';
+  if (t.startsWith('image/')) return `![${name}](${url})`;
+  if (t.startsWith('video/')) return `\n![video](${url})\n`;
+  if (t.startsWith('audio/')) return `\n![audio](${url})\n`;
+  return `[📎 ${name}](${url})`;
+}
+function putWithProgress(url, file, headers, onProgress) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('PUT', url);
+    Object.entries(headers || {}).forEach(([k, v]) => x.setRequestHeader(k, v));
+    x.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    x.onload = () => (x.status >= 200 && x.status < 300 ? resolve() : reject(Object.assign(new Error(`上傳失敗 (${x.status})`), { status: x.status })));
+    x.onerror = () => reject(Object.assign(new Error('網絡錯誤'), { status: 0 }));
+    x.send(file);
+  });
+}
+async function replacePlaceholder(note, ph, text) {
+  if (S.current && S.current.id === note.id) {
+    const t = $('#body');
+    const i = t.value.indexOf(ph);
+    if (i < 0) return;
+    t.setRangeText(text, i, i + ph.length, 'preserve');
+    t.dispatchEvent(new Event('input'));
+    if (S.mode === 'read') renderPreview();
+    return;
+  }
+  // 上傳期間切換了筆記：直接改寫那篇
+  try {
+    const { note: fresh } = await api('/notes/' + note.id);
+    if (fresh.content.includes(ph)) {
+      const { note: saved } = await api('/notes/' + note.id, { method: 'PUT', body: { content: fresh.content.replace(ph, text) } });
+      upsertSummary(saved);
+    }
+  } catch (e) { toast(e.message); }
+}
+async function uploadOne(file) {
+  const note = S.current;
+  if (!note) return;
+  const maxMb = (S.meta.storage && S.meta.storage.maxMb) || 200;
+  if (file.size > maxMb * 1024 * 1024) { toast(`${file.name} 超過 ${maxMb} MB 上限`); return; }
+  const ph = `‹上傳中 ${file.name || 'file'} #${++upSeq}›`;
+  if (S.mode === 'read') setMode('edit');
+  insertText(ph);
+  try {
+    const up = await api('/uploads', { method: 'POST', body: { name: file.name, type: file.type, size: file.size } });
+    const show = (p) => setStatus(`上傳 ${file.name} ${Math.round(p * 100)}%`);
+    let done = false;
+    if (up.uploadUrl) {
+      try { await putWithProgress(up.uploadUrl, file, up.headers, show); done = true; }
+      catch (e) { if (e.status !== 0 || file.size > up.proxyMax) throw e; }
+    }
+    if (!done) {
+      if (file.size > up.proxyMax) throw new Error('無法直傳到 Neon（CORS 未設定），且文件超過中轉上限 4 MB');
+      await putWithProgress('/api/uploads/' + encodeURIComponent(up.key), file,
+        { 'Content-Type': 'application/octet-stream', Authorization: 'Bearer ' + S.token }, show);
+    }
+    await replacePlaceholder(note, ph, mdFor(file, up.url));
+    setStatus('已上傳');
+  } catch (e) {
+    await replacePlaceholder(note, ph, '');
+    toast(`${file.name}：${e.message}`);
+  }
+}
+async function uploadFiles(files) {
+  for (const f of files) await uploadOne(f);
+}
+
 const CMDS = {
   heading: () => linePrefix('## '),
   bold: () => wrap('**', '**', '粗體'),
@@ -664,6 +748,7 @@ const CMDS = {
   image: () => insertMedia('image'),
   audio: () => insertMedia('audio'),
   video: () => insertMedia('video'),
+  upload: () => pickFiles(),
 };
 
 /* ================= events ================= */
@@ -742,6 +827,22 @@ function bind() {
     if (e.key === 'Tab' && !mod) { e.preventDefault(); insertText('  '); }
     if (mod && e.key.toLowerCase() === 'b') { e.preventDefault(); CMDS.bold(); }
     if (mod && e.key.toLowerCase() === 'i') { e.preventDefault(); CMDS.italic(); }
+  });
+  // 貼上 / 拖入文件直接上傳
+  $('#body').addEventListener('paste', (e) => {
+    const files = [...(e.clipboardData?.files || [])];
+    if (!files.length || !S.meta.storage?.enabled) return;
+    e.preventDefault();
+    uploadFiles(files);
+  });
+  $('#body').addEventListener('dragover', (e) => { if (e.dataTransfer?.types?.includes('Files')) e.preventDefault(); });
+  $('#body').addEventListener('drop', (e) => {
+    const files = [...(e.dataTransfer?.files || [])];
+    if (!files.length) return;
+    e.preventDefault();
+    if (!S.meta.storage?.enabled) { toast('尚未設定 Neon Object Storage'); return; }
+    $('#body').focus();
+    uploadFiles(files);
   });
   $('#catSel').addEventListener('change', (e) => {
     S.current.category_id = e.target.value ? Number(e.target.value) : null;
