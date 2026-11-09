@@ -660,7 +660,7 @@ function pickFiles() {
   if (S.meta.storage && !S.meta.storage.enabled) { toast('尚未設定 Neon Object Storage，請在 Netlify 加上 NEON_S3_* 變量'); return; }
   const inp = document.createElement('input');
   inp.type = 'file';
-  inp.multiple = true;
+  inp.multiple = false;
   inp.accept = 'image/*,video/*,audio/*,*/*';
   inp.onchange = () => uploadFiles([...inp.files]);
   inp.click();
@@ -738,6 +738,8 @@ async function uploadOne(file, note, ph) {
 async function uploadFiles(files) {
   const note = S.current;
   if (!note || !files.length) return;
+  // 一次只上傳一個文件
+  if (files.length > 1) { toast('一次只能上傳一個文件，已取第一個'); files = files.slice(0, 1); }
   const maxMb = (S.meta.storage && S.meta.storage.maxMb) || 200;
   const ok = files.filter((f) => {
     if (f.size <= maxMb * 1024 * 1024) return true;
