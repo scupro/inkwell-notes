@@ -684,33 +684,36 @@ function putWithProgress(url, file, headers, onProgress) {
     x.send(file);
   });
 }
+let remoteChain = Promise.resolve();
 async function replacePlaceholder(note, ph, text) {
   if (S.current && S.current.id === note.id) {
     const t = $('#body');
     const i = t.value.indexOf(ph);
     if (i < 0) return;
-    t.setRangeText(text, i, i + ph.length, 'preserve');
+    const j = i + ph.length;
+    const d = text.length - ph.length;
+    // 自行維護游標，避免 'preserve' 把游標移到插入點前面
+    const fix = (p) => (p >= j ? p + d : p > i ? i + text.length : p);
+    const ss = fix(t.selectionStart), se = fix(t.selectionEnd);
+    t.value = t.value.slice(0, i) + text + t.value.slice(j);
+    t.setSelectionRange(ss, se);
     t.dispatchEvent(new Event('input'));
-    if (S.mode === 'read') renderPreview();
+    if (S.mode !== 'edit') renderPreviewSoon();
     return;
   }
-  // 上傳期間切換了筆記：直接改寫那篇
-  try {
-    const { note: fresh } = await api('/notes/' + note.id);
-    if (fresh.content.includes(ph)) {
-      const { note: saved } = await api('/notes/' + note.id, { method: 'PUT', body: { content: fresh.content.replace(ph, text) } });
-      upsertSummary(saved);
-    }
-  } catch (e) { toast(e.message); }
+  // 上傳期間切換了筆記：依序改寫那篇（避免多個上傳互相覆蓋）
+  remoteChain = remoteChain.then(async () => {
+    try {
+      const { note: fresh } = await api('/notes/' + note.id);
+      if (fresh.content.includes(ph)) {
+        const { note: saved } = await api('/notes/' + note.id, { method: 'PUT', body: { content: fresh.content.replace(ph, text) } });
+        upsertSummary(saved);
+      }
+    } catch (e) { toast(e.message); }
+  });
+  return remoteChain;
 }
-async function uploadOne(file) {
-  const note = S.current;
-  if (!note) return;
-  const maxMb = (S.meta.storage && S.meta.storage.maxMb) || 200;
-  if (file.size > maxMb * 1024 * 1024) { toast(`${file.name} 超過 ${maxMb} MB 上限`); return; }
-  const ph = `‹上傳中 ${file.name || 'file'} #${++upSeq}›`;
-  if (S.mode === 'read') setMode('edit');
-  insertText(ph);
+async function uploadOne(file, note, ph) {
   try {
     const up = await api('/uploads', { method: 'POST', body: { name: file.name, type: file.type, size: file.size } });
     const show = (p) => setStatus(`上傳 ${file.name} ${Math.round(p * 100)}%`);
@@ -724,15 +727,44 @@ async function uploadOne(file) {
       await putWithProgress('/api/uploads/' + encodeURIComponent(up.key), file,
         { 'Content-Type': 'application/octet-stream', Authorization: 'Bearer ' + S.token }, show);
     }
-    await replacePlaceholder(note, ph, mdFor(file, up.url));
-    setStatus('已上傳');
+    await replacePlaceholder(note, ph, mdFor(file, up.url).trim());
+    return true;
   } catch (e) {
     await replacePlaceholder(note, ph, '');
     toast(`${file.name}：${e.message}`);
+    return false;
   }
 }
 async function uploadFiles(files) {
-  for (const f of files) await uploadOne(f);
+  const note = S.current;
+  if (!note || !files.length) return;
+  const maxMb = (S.meta.storage && S.meta.storage.maxMb) || 200;
+  const ok = files.filter((f) => {
+    if (f.size <= maxMb * 1024 * 1024) return true;
+    toast(`${f.name} 超過 ${maxMb} MB 上限`);
+    return false;
+  });
+  if (!ok.length) return;
+  if (S.mode === 'read') setMode('edit');
+  // 一次插入全部佔位符（按選擇順序，每個一行），之後各自替換
+  const jobs = ok.map((f) => ({ f, ph: `‹上傳中 ${f.name || 'file'} #${++upSeq}›` }));
+  const t = $('#body');
+  const before = t.value.slice(0, t.selectionStart);
+  const after = t.value.slice(t.selectionEnd);
+  const multi = jobs.length > 1;
+  const lead = multi && before && !before.endsWith('\n') ? '\n' : '';
+  const tail = multi && after && !after.startsWith('\n') ? '\n' : '';
+  insertText(lead + jobs.map((j) => j.ph).join('\n') + tail);
+  // 最多同時 3 個
+  let next = 0, okCount = 0;
+  const worker = async () => {
+    while (next < jobs.length) {
+      const j = jobs[next++];
+      if (await uploadOne(j.f, note, j.ph)) okCount++;
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, jobs.length) }, worker));
+  setStatus(okCount === jobs.length ? `已上傳 ${okCount} 個文件` : `已上傳 ${okCount}/${jobs.length}`);
 }
 
 const CMDS = {
