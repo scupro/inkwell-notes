@@ -13,7 +13,9 @@ const sql = DB_URL ? neon(DB_URL) : null;
    Netlify 保留 AWS_* 變量名，所以用 NEON_S3_* */
 const S3 = {
   endpoint: process.env.NEON_S3_ENDPOINT || process.env.AWS_ENDPOINT_URL_S3 || '',
-  region: process.env.NEON_S3_REGION || 'us-east-2',
+  // 沒填就從端點解析（…storage.c-2.us-east-2.aws.neon.tech → us-east-2）
+  region: process.env.NEON_S3_REGION || process.env.AWS_REGION_S3 ||
+    ((process.env.NEON_S3_ENDPOINT || process.env.AWS_ENDPOINT_URL_S3 || '').match(/\.([a-z]{2}-[a-z]+-\d)\.aws\./) || [])[1] || 'us-east-1',
   accessKeyId: process.env.NEON_S3_ACCESS_KEY_ID || '',
   secretAccessKey: process.env.NEON_S3_SECRET_ACCESS_KEY || '',
   bucket: process.env.NEON_S3_BUCKET || 'inkwell',

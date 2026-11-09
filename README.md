@@ -32,10 +32,10 @@
 | `AUTH_SECRET` | 建議 | 令牌簽名密鑰，`openssl rand -hex 32` |
 | `SESSION_DAYS` | 否 | 登入有效天數，默認 30 |
 | `NEON_S3_ENDPOINT` | 上傳用 | 分支的 S3 端點，例 `https://br-xxx.storage.c-2.us-east-2.aws.neon.tech` |
-| `NEON_S3_REGION` | 上傳用 | 例 `us-east-2`（默認） |
+| `NEON_S3_REGION` | 否 | 不填則從端點自動解析 |
 | `NEON_S3_ACCESS_KEY_ID` | 上傳用 | 憑證的 `token_id`（`nak_live_…`） |
 | `NEON_S3_SECRET_ACCESS_KEY` | 上傳用 | 憑證的 `s3_secret_access_key`（`nsk_live_…`，只顯示一次） |
-| `NEON_S3_BUCKET` | 否 | bucket 名，默認 `inkwell`（不存在時會嘗試自動建立） |
+| `NEON_S3_BUCKET` | 否 | 用自己的 bucket 名；不填用 `inkwell`，不存在時會嘗試自動建立 |
 | `UPLOAD_MAX_MB` | 否 | 單文件上限，默認 200 |
 
 > Netlify Functions 跑在 AWS Lambda 上，`AWS_ACCESS_KEY_ID` 等名稱被保留，所以用 `NEON_S3_*`。
