@@ -37,6 +37,7 @@
 | `NEON_S3_SECRET_ACCESS_KEY` | 上傳用 | 憑證的 `s3_secret_access_key`（`nsk_live_…`，只顯示一次） |
 | `NEON_S3_BUCKET` | 否 | 用自己的 bucket 名；不填用 `inkwell`，不存在時會嘗試自動建立 |
 | `UPLOAD_MAX_MB` | 否 | 單文件上限，默認 200 |
+| `CORS_ORIGINS` | 否 | 額外永遠允許直傳的網址（逗號分隔，如自訂網域）；正式網址 `URL` 已自動保留 |
 
 > Netlify Functions 跑在 AWS Lambda 上，`AWS_ACCESS_KEY_ID` 等名稱被保留，所以用 `NEON_S3_*`。
 > Object Storage 只支援 AWS US East (Ohio / N. Virginia)、Frankfurt、Singapore 區域的 Neon 項目。
@@ -59,7 +60,7 @@ schema.sql         數據表（可選）
 ```
 
 ## API
-`POST /api/login` · `GET /api/meta` · `GET/POST /api/notes` · `GET/PUT/DELETE /api/notes/:id` · `POST /api/categories` · `PUT/DELETE /api/categories/:id` · `POST /api/uploads` · `PUT /api/uploads/:key`（中轉後備）· `GET /api/files/:key` · `POST /api/logout`
+`POST /api/login` · `GET /api/meta` · `GET/POST /api/notes` · `GET/PUT/DELETE /api/notes/:id` · `POST /api/categories` · `PUT/DELETE /api/categories/:id` · `POST /api/uploads`（返回預簽名 PUT，瀏覽器直傳 Neon，不經函數中轉）· `GET /api/files/:key` · `POST /api/logout`
 
 ## License
 

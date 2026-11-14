@@ -22,7 +22,9 @@ const S3 = {
 };
 const STORAGE_ON = !!(S3.endpoint && S3.accessKeyId && S3.secretAccessKey);
 const MAX_MB = Number(process.env.UPLOAD_MAX_MB) || 200;
-const PROXY_MAX = 4 * 1024 * 1024; // 直傳失敗時經函數中轉的上限（Netlify 請求體上限約 6MB）
+// 正式網址永遠保留在 bucket CORS 白名單裡（Netlify 自動提供 URL；也可用 CORS_ORIGINS 追加，逗號分隔）
+const PINNED_ORIGINS = [process.env.URL, ...(process.env.CORS_ORIGINS || '').split(',')]
+  .map((x) => (x || '').trim().replace(/\/+$/, '')).filter(Boolean);
 const FILE_KEY_RE = /^u\/\d{4}\/\d{2}\/[0-9a-f-]{36}(\.[a-z0-9]{1,8})?$/;
 const COOKIE = 'ink_files';
 
@@ -82,10 +84,10 @@ function s3() {
   return s3p;
 }
 
-// 確保 bucket 存在，並允許當前網站來源直接 PUT 上傳（CORS）
+// 確保 bucket 存在，並允許當前網站來源直接 PUT 上傳（CORS）。只走直傳：設定不了就報錯，不中轉。
 const corsOk = new Set();
 async function ensureBucket(origin) {
-  if (corsOk.has(origin)) return true;
+  if (corsOk.has(origin)) return;
   const { m, client } = await s3();
   const Bucket = S3.bucket;
   try {
@@ -99,14 +101,17 @@ async function ensureBucket(origin) {
       throw new Error(`找不到 bucket「${Bucket}」，自動建立也失敗了，請在 Neon Console 的 Object storage 手動建立（${e2.name || e2.message}）`);
     }
   }
+  let origins = [];
   try {
-    let origins = [];
+    const r = await client.send(new m.GetBucketCorsCommand({ Bucket }));
+    origins = (r.CORSRules || []).flatMap((x) => x.AllowedOrigins || []);
+  } catch { /* 尚未設定 CORS */ }
+  const need = [...new Set([...PINNED_ORIGINS, origin])];
+  if (!origins.includes('*') && need.some((o) => !origins.includes(o))) {
+    // 固定來源永遠保留；其餘（預覽 / 分支部署網址）只留最新的，避免名單無限增長
+    const others = origins.filter((o) => !need.includes(o)).slice(-15);
+    const all = [...need, ...others];
     try {
-      const r = await client.send(new m.GetBucketCorsCommand({ Bucket }));
-      origins = (r.CORSRules || []).flatMap((x) => x.AllowedOrigins || []);
-    } catch { /* 尚未設定 CORS */ }
-    if (!origins.includes(origin) && !origins.includes('*')) {
-      const all = [...new Set([...origins, origin])].slice(-20);
       await client.send(new m.PutBucketCorsCommand({
         Bucket,
         CORSConfiguration: { CORSRules: [{
@@ -114,13 +119,11 @@ async function ensureBucket(origin) {
           AllowedHeaders: ['*'], ExposeHeaders: ['ETag'], MaxAgeSeconds: 3600,
         }] },
       }));
+    } catch (e) {
+      throw new Error(`無法設定 bucket CORS（${e?.name || e?.message || e}），請確認 Neon 憑證有 storage:write 權限，或在 Neon 手動為 ${origin} 設定 CORS`);
     }
-    corsOk.add(origin);
-    return true;
-  } catch (e) {
-    console.warn('PutBucketCors failed, client will fall back to proxy upload:', e?.name || e);
-    return false;
   }
+  corsOk.add(origin);
 }
 function newKey(name) {
   const d = new Date();
@@ -240,30 +243,12 @@ export default async (req) => {
       const size = Number(b.size) || 0;
       if (size > MAX_MB * 1024 * 1024) return json({ error: `文件超過 ${MAX_MB} MB 上限` }, 413);
       const origin = req.headers.get('origin') || url.origin;
-      const direct = await ensureBucket(origin);
+      await ensureBucket(origin);
       const key = newKey(name);
       const { m, client, sign } = await s3();
-      const uploadUrl = direct
-        ? await sign(client, new m.PutObjectCommand({ Bucket: S3.bucket, Key: key, ContentType: type }), { expiresIn: 900 })
-        : null;
+      const uploadUrl = await sign(client, new m.PutObjectCommand({ Bucket: S3.bucket, Key: key, ContentType: type }), { expiresIn: 900 });
       await sql`INSERT INTO uploads (key, name, type, size) VALUES (${key}, ${name}, ${type}, ${size})`;
-      return json({ key, url: `/api/files/${key}`, uploadUrl, headers: { 'Content-Type': type }, proxyMax: PROXY_MAX }, 201);
-    }
-
-    // 後備：經函數中轉上傳（小文件，直傳被 CORS 擋住時用）
-    const um = path.match(/^\/uploads\/(.+)$/);
-    if (um && method === 'PUT') {
-      if (!STORAGE_ON) return json({ error: '尚未設定 Neon Object Storage' }, 503);
-      const key = decodeURIComponent(um[1]);
-      if (!FILE_KEY_RE.test(key)) return json({ error: 'bad key' }, 400);
-      const [row] = await sql`SELECT type FROM uploads WHERE key = ${key}`;
-      if (!row) return json({ error: '未知的上傳' }, 404);
-      const body = Buffer.from(await req.arrayBuffer());
-      if (body.length > PROXY_MAX) return json({ error: '文件太大，無法中轉上傳' }, 413);
-      const { m, client } = await s3();
-      await client.send(new m.PutObjectCommand({ Bucket: S3.bucket, Key: key, Body: body, ContentType: row.type }));
-      await sql`UPDATE uploads SET size = ${body.length} WHERE key = ${key}`;
-      return json({ ok: true });
+      return json({ key, url: `/api/files/${key}`, uploadUrl, headers: { 'Content-Type': type } }, 201);
     }
 
     // 筆記列表

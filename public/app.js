@@ -717,15 +717,10 @@ async function uploadOne(file, note, ph) {
   try {
     const up = await api('/uploads', { method: 'POST', body: { name: file.name, type: file.type, size: file.size } });
     const show = (p) => setStatus(`上傳 ${file.name} ${Math.round(p * 100)}%`);
-    let done = false;
-    if (up.uploadUrl) {
-      try { await putWithProgress(up.uploadUrl, file, up.headers, show); done = true; }
-      catch (e) { if (e.status !== 0 || file.size > up.proxyMax) throw e; }
-    }
-    if (!done) {
-      if (file.size > up.proxyMax) throw new Error('無法直傳到 Neon（CORS 未設定），且文件超過中轉上限 4 MB');
-      await putWithProgress('/api/uploads/' + encodeURIComponent(up.key), file,
-        { 'Content-Type': 'application/octet-stream', Authorization: 'Bearer ' + S.token }, show);
+    try { await putWithProgress(up.uploadUrl, file, up.headers, show); }
+    catch (e) {
+      if (e.status === 0) throw new Error('直傳 Neon 被瀏覽器擋住（CORS 或網絡問題）');
+      throw e;
     }
     await replacePlaceholder(note, ph, mdFor(file, up.url).trim());
     return true;
