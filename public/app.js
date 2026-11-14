@@ -654,10 +654,10 @@ function insertMedia(kind) {
   if (!u || !u.trim()) return;
   insertText(kind === 'image' ? `![](${u.trim()})` : `\n![${kind}](${u.trim()})\n`);
 }
-/* ---- 上傳到 Neon Object Storage ---- */
+/* ---- 上傳到 S3 相容物件儲存 ---- */
 let upSeq = 0;
 function pickFiles() {
-  if (S.meta.storage && !S.meta.storage.enabled) { toast('尚未設定 Neon Object Storage，請在 Netlify 加上 NEON_S3_* 變量'); return; }
+  if (S.meta.storage && !S.meta.storage.enabled) { toast('尚未設定物件儲存，請在 Netlify 加上 S3_* 變量'); return; }
   const inp = document.createElement('input');
   inp.type = 'file';
   inp.multiple = false;
@@ -719,7 +719,7 @@ async function uploadOne(file, note, ph) {
     const show = (p) => setStatus(`上傳 ${file.name} ${Math.round(p * 100)}%`);
     try { await putWithProgress(up.uploadUrl, file, up.headers, show); }
     catch (e) {
-      if (e.status === 0) throw new Error('直傳 Neon 被瀏覽器擋住（CORS 或網絡問題）');
+      if (e.status === 0) throw new Error('直傳物件儲存被瀏覽器擋住（CORS 或網絡問題）');
       throw e;
     }
     await replacePlaceholder(note, ph, mdFor(file, up.url).trim());
@@ -869,7 +869,7 @@ function bind() {
     const files = [...(e.dataTransfer?.files || [])];
     if (!files.length) return;
     e.preventDefault();
-    if (!S.meta.storage?.enabled) { toast('尚未設定 Neon Object Storage'); return; }
+    if (!S.meta.storage?.enabled) { toast('尚未設定物件儲存'); return; }
     $('#body').focus();
     uploadFiles(files);
   });

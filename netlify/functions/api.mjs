@@ -9,16 +9,22 @@ const SECRET = (process.env.AUTH_SECRET || '') + '|' + PASSWORD;
 const SESSION_DAYS = Number(process.env.SESSION_DAYS) || 30;
 const sql = DB_URL ? neon(DB_URL) : null;
 
-/* ---------- Neon Object Storage（可選） ----------
-   Netlify 保留 AWS_* 變量名，所以用 NEON_S3_* */
+/* ---------- S3 相容物件儲存（可選：Neon / Cloudflare R2 / Backblaze B2 / AWS S3 / MinIO…） ----------
+   Netlify 保留 AWS_* 變量名，所以用 S3_*（舊的 NEON_S3_* 仍然有效） */
+const env = (k) => process.env['S3_' + k] || process.env['NEON_S3_' + k] || '';
+const S3_ENDPOINT = env('ENDPOINT') || process.env.AWS_ENDPOINT_URL_S3 || '';
 const S3 = {
-  endpoint: process.env.NEON_S3_ENDPOINT || process.env.AWS_ENDPOINT_URL_S3 || '',
-  // 沒填就從端點解析（…storage.c-2.us-east-2.aws.neon.tech → us-east-2）
-  region: process.env.NEON_S3_REGION || process.env.AWS_REGION_S3 ||
-    ((process.env.NEON_S3_ENDPOINT || process.env.AWS_ENDPOINT_URL_S3 || '').match(/\.([a-z]{2}-[a-z]+-\d)\.aws\./) || [])[1] || 'us-east-1',
-  accessKeyId: process.env.NEON_S3_ACCESS_KEY_ID || '',
-  secretAccessKey: process.env.NEON_S3_SECRET_ACCESS_KEY || '',
-  bucket: process.env.NEON_S3_BUCKET || 'inkwell',
+  endpoint: S3_ENDPOINT,
+  // 沒填就從端點推斷：R2 → auto；…us-east-2.aws… / s3.eu-central-003.backblazeb2.com → 對應區域
+  region: env('REGION') || process.env.AWS_REGION_S3 ||
+    (/\.r2\.cloudflarestorage\.com/.test(S3_ENDPOINT) ? 'auto'
+      : (S3_ENDPOINT.match(/[.\/]([a-z]{2}-[a-z]+-\d{1,3})\./) || [])[1] || 'us-east-1'),
+  accessKeyId: env('ACCESS_KEY_ID'),
+  secretAccessKey: env('SECRET_ACCESS_KEY'),
+  bucket: env('BUCKET') || 'inkwell',
+  pathStyle: env('FORCE_PATH_STYLE') !== 'false',
+  // false：不自動建 bucket / 設 CORS，CORS 請在服務商後台自己設定（R2、B2 或權限受限的金鑰用）
+  manageCors: env('MANAGE_CORS') !== 'false',
 };
 const STORAGE_ON = !!(S3.endpoint && S3.accessKeyId && S3.secretAccessKey);
 const MAX_MB = Number(process.env.UPLOAD_MAX_MB) || 200;
@@ -74,7 +80,7 @@ function s3() {
         region: S3.region,
         endpoint: S3.endpoint,
         credentials: { accessKeyId: S3.accessKeyId, secretAccessKey: S3.secretAccessKey },
-        forcePathStyle: true,
+        forcePathStyle: S3.pathStyle,
         requestChecksumCalculation: 'WHEN_REQUIRED',
         responseChecksumValidation: 'WHEN_REQUIRED',
       });
@@ -87,7 +93,7 @@ function s3() {
 // 確保 bucket 存在，並允許當前網站來源直接 PUT 上傳（CORS）。只走直傳：設定不了就報錯，不中轉。
 const corsOk = new Set();
 async function ensureBucket(origin) {
-  if (corsOk.has(origin)) return;
+  if (!S3.manageCors || corsOk.has(origin)) return;
   const { m, client } = await s3();
   const Bucket = S3.bucket;
   try {
@@ -98,7 +104,7 @@ async function ensureBucket(origin) {
     try {
       await client.send(new m.CreateBucketCommand({ Bucket }));
     } catch (e2) {
-      throw new Error(`找不到 bucket「${Bucket}」，自動建立也失敗了，請在 Neon Console 的 Object storage 手動建立（${e2.name || e2.message}）`);
+      throw new Error(`找不到 bucket「${Bucket}」，自動建立也失敗了，請在儲存服務後台手動建立（${e2.name || e2.message}）`);
     }
   }
   let origins = [];
@@ -120,7 +126,7 @@ async function ensureBucket(origin) {
         }] },
       }));
     } catch (e) {
-      throw new Error(`無法設定 bucket CORS（${e?.name || e?.message || e}），請確認 Neon 憑證有 storage:write 權限，或在 Neon 手動為 ${origin} 設定 CORS`);
+      throw new Error(`無法設定 bucket CORS（${e?.name || e?.message || e}），請確認金鑰有設定 bucket 的權限；或在儲存服務後台為 ${origin} 設定 CORS（允許 PUT/GET/HEAD），並把 S3_MANAGE_CORS 設為 false`);
     }
   }
   corsOk.add(origin);
@@ -234,9 +240,9 @@ export default async (req) => {
         200, { 'set-cookie': fileCookie(token) });
     }
 
-    // 申請上傳：返回預簽名 PUT 地址，瀏覽器直接上傳到 Neon Object Storage
+    // 申請上傳：返回預簽名 PUT 地址，瀏覽器直接上傳到物件儲存
     if (path === '/uploads' && method === 'POST') {
-      if (!STORAGE_ON) return json({ error: '尚未設定 Neon Object Storage（NEON_S3_* 環境變量）' }, 503);
+      if (!STORAGE_ON) return json({ error: '尚未設定物件儲存（S3_* 環境變量）' }, 503);
       const b = await readBody(req);
       const name = String(b.name || 'file').slice(0, 200);
       const type = String(b.type || '').slice(0, 100) || 'application/octet-stream';
